@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import io
 
 st.title("Cálculo do Ganho da Antena AUT - Método das Três Antenas")
 
@@ -12,20 +13,38 @@ Este aplicativo calcula o **ganho absoluto da antena AUT** com base em três med
 - AUT + HORN
 """)
 
-# Função robusta para leitura dos CSVs
+# Função universal para ler CSV com diferentes separadores e codificações
 def read_s21_file(file):
-    possible_delims = [",", ";", "\t", " "]
-    for delim in possible_delims:
-        try:
-            df = pd.read_csv(file, sep=delim, header=None)
-            if df.shape[1] >= 2:
-                df = df.iloc[:, :2]
-                df.columns = ["Frequência (MHz)", "S21 (dB)"]
-                df = df.dropna()
-                return df
-        except Exception:
-            continue
-    raise ValueError("Não foi possível ler o arquivo. Verifique o separador ou o formato.")
+    # Lê o conteúdo bruto
+    raw = file.getvalue().decode(errors='ignore')
+    sample = raw[:200]
+    # Detecta separador mais provável
+    if ";" in sample:
+        sep = ";"
+    elif "\t" in sample:
+        sep = "\t"
+    elif "," in sample:
+        sep = ","
+    else:
+        sep = r"\s+"  # espaços múltiplos
+
+    # Tenta ler o CSV sem cabeçalho
+    df = pd.read_csv(io.StringIO(raw), sep=sep, header=None, engine="python")
+
+    # Garante que há ao menos duas colunas
+    if df.shape[1] < 2:
+        raise ValueError("Arquivo tem menos de duas colunas válidas.")
+
+    # Usa apenas as duas primeiras colunas
+    df = df.iloc[:, :2]
+    df.columns = ["Frequência (MHz)", "S21 (dB)"]
+    df = df.dropna()
+
+    # Se as frequências forem muito grandes, converte de Hz para MHz
+    if df["Frequência (MHz)"].max() > 1e5:
+        df["Frequência (MHz)"] /= 1e6
+
+    return df
 
 # Upload dos arquivos
 file_aut_logped = st.file_uploader("Carregue o arquivo S21 AUT + LOGPED", type=["csv"])
@@ -39,6 +58,11 @@ if file_aut_logped and file_horn_logped and file_aut_horn and freq_input > 0:
         df_aut_logped = read_s21_file(file_aut_logped)
         df_horn_logped = read_s21_file(file_horn_logped)
         df_aut_horn = read_s21_file(file_aut_horn)
+
+        st.success("Arquivos lidos com sucesso!")
+        st.write("Prévia dos dados (AUT + LOGPED):")
+        st.dataframe(df_aut_logped.head())
+
     except Exception as e:
         st.error(f"Erro ao ler os arquivos: {e}")
         st.stop()
