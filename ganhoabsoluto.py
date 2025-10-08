@@ -95,12 +95,12 @@ if f_aut_logped and f_horn_logped and f_aut_horn and freq_input > 0:
         st.stop()
 
     # mostra prévias para conferência (nomes atualizados)
-    st.write("Prévia (AUT + ANT2):")
-    st.dataframe(df_aut_logped.head())
-    st.write("Prévia (ANT1 + ANT2):")
-    st.dataframe(df_horn_logped.head())
-    st.write("Prévia (AUT + ANT1):")
-    st.dataframe(df_aut_horn.head())
+    # st.write("Prévia (AUT + ANT2):")
+    # st.dataframe(df_aut_logped.head())
+    # st.write("Prévia (ANT1 + ANT2):")
+    # st.dataframe(df_horn_logped.head())
+    # st.write("Prévia (AUT + ANT1):")
+    # st.dataframe(df_aut_horn.head())
 
     # função de interpolaçao (garante ordenação)
     def interp(df, fMHz):
