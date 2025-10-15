@@ -101,7 +101,7 @@ if file_ref and file_aut:
         ax.set_title(f"Ganho da AUT em torno de {freq_input:.1f} MHz (±20%)")
         ax.grid(True)
         ax.legend()
-        st.pyplot(fig)
+        #st.pyplot(fig)
 
         # === Cálculo pontual ===
         if freq_input > 0:
