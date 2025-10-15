@@ -16,7 +16,7 @@ O programa irá:
 1. Ler e interpretar os arquivos S2P (ignorando cabeçalho);
 2. Interpolar os dados para a frequência informada;
 3. Calcular o ganho da AUT;
-4. Mostrar o gráfico de ganho em função da frequência.
+4. Mostrar o gráfico do ganho centrado na frequência informada (±20%).
 """)
 
 # === Upload dos arquivos ===
@@ -79,16 +79,31 @@ if file_ref and file_aut:
             G_aut_curve.append(g)
         G_aut_curve = np.array(G_aut_curve)
 
+        # === Faixa de frequência para exibir (±20%) ===
+        if freq_input > 0:
+            bw_min = freq_input * 0.8
+            bw_max = freq_input * 1.2
+        else:
+            bw_min = freqs_common.min()
+            bw_max = freqs_common.max()
+
+        mask_bw = (freqs_common >= bw_min) & (freqs_common <= bw_max)
+        freqs_plot = freqs_common[mask_bw]
+        gains_plot = G_aut_curve[mask_bw]
+
         # === Gráfico ===
         fig, ax = plt.subplots()
-        ax.plot(freqs_common, G_aut_curve, label="Ganho da AUT", linewidth=2)
+        ax.plot(freqs_plot, gains_plot, label="Ganho da AUT", linewidth=2)
+        ax.axvline(freq_input, color='r', linestyle='--', label=f'{freq_input:.1f} MHz')
+        ax.set_xlim(bw_min, bw_max)
         ax.set_xlabel("Frequência (MHz)")
         ax.set_ylabel("Ganho (dBi)")
+        ax.set_title(f"Ganho da AUT em torno de {freq_input:.1f} MHz (±20%)")
         ax.grid(True)
         ax.legend()
         st.pyplot(fig)
 
-        # === Cálculo pontual na frequência solicitada ===
+        # === Cálculo pontual ===
         if freq_input > 0:
             S21_ref = np.interp(freq_input, df_ref["Freq_MHz"], df_ref["S21_mag"])
             S21_aut = np.interp(freq_input, df_aut["Freq_MHz"], df_aut["S21_mag"])
