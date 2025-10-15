@@ -2,14 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import matplotlib.pyplot as plt
 
-st.title("Cálculo de Ganho da Antena Sob Teste (AUT) a partir de arquivos S2P")
+st.title("Cálculo e Visualização do Ganho da Antena Sob Teste (AUT) a partir de arquivos S2P")
 
 st.markdown("""
-Este aplicativo calcula o ganho de uma antena sob teste (AUT) com base em medições S2P.
+Este aplicativo calcula o **ganho da antena sob teste (AUT)** a partir de medições S2P.
+
 Você deve carregar:
-- Um arquivo S2P referente à medição entre a antena transmissora e a **antena padrão** (com ganho conhecido);
-- Um arquivo S2P referente à medição entre a antena transmissora e a **antena sob teste (AUT)**.
+- Um arquivo S2P referente à medição entre a **antena transmissora e a antena padrão** (ganho conhecido);
+- Um arquivo S2P referente à medição entre a **antena transmissora e a antena sob teste (AUT)**.
 """)
 
 # === Upload dos arquivos ===
@@ -25,7 +27,6 @@ def read_s2p(file):
     if file is None:
         return None
 
-    # Lê o conteúdo e ignora o cabeçalho (linhas começando com '!' ou '#')
     content = file.getvalue().decode(errors='ignore').splitlines()
     data_lines = [line for line in content if not line.startswith('!') and not line.startswith('#') and line.strip() != '']
     df = pd.read_csv(io.StringIO("\n".join(data_lines)), 
@@ -37,12 +38,6 @@ def read_s2p(file):
 
 # === Interpolação ===
 def interpolate_param(df, freq_target):
-    # Verifica se freq_target está dentro do intervalo
-    if freq_target < df["Freq"].min() or freq_target > df["Freq"].max():
-        st.warning("Frequência fora do intervalo de dados!")
-        return None
-    
-    # Interpola magnitude e fase
     s11_mag = np.interp(freq_target, df["Freq"], df["S11_mag"])
     s21_mag = np.interp(freq_target, df["Freq"], df["S21_mag"])
     s22_mag = np.interp(freq_target, df["Freq"], df["S22_mag"])
@@ -50,32 +45,57 @@ def interpolate_param(df, freq_target):
 
 # === Cálculo do ganho ===
 def calc_gain(G_ref, S21_aut_dB, S21_ref_dB, S11_aut_dB, S11_ref_dB):
-    # Converte S11 de dB para |Γ|
     gamma_aut = 10**(S11_aut_dB/20)
     gamma_ref = 10**(S11_ref_dB/20)
-
-    # Fórmula: G_AUT = G_ref + (S21_aut - S21_ref) + 10*log10((1 - |Γ_ref|²)/(1 - |Γ_aut|²))
     gain_aut = G_ref + (S21_aut_dB - S21_ref_dB) + 10*np.log10((1 - gamma_ref**2)/(1 - gamma_aut**2))
     return gain_aut
 
-# === Quando ambos arquivos são carregados ===
-if file_ref and file_aut and freq_input > 0:
+if file_ref and file_aut:
     df_ref = read_s2p(file_ref)
     df_aut = read_s2p(file_aut)
 
     if df_ref is not None and df_aut is not None:
-        # Converte MHz para mesma unidade dos arquivos (verifica automaticamente)
+        # Detecta se a frequência está em Hz (valores grandes)
         freq_target = freq_input
-        # Detecta unidade (se valores ~10^6, então Hz)
         if df_ref["Freq"].mean() > 1e6:
-            freq_target *= 1e6
+            freq_target *= 1e6  # converte MHz -> Hz
 
+        # Interpola nas frequências
         s11_ref, s21_ref, s22_ref = interpolate_param(df_ref, freq_target)
         s11_aut, s21_aut, s22_aut = interpolate_param(df_aut, freq_target)
 
-        if None not in [s11_ref, s21_ref, s11_aut, s21_aut]:
-            # Cálculo do ganho
-            G_aut = calc_gain(G_ref, s21_aut, s21_ref, s11_aut, s11_ref)
-            st.success(f"Ganho da antena sob teste (AUT) na frequência {freq_input:.2f} MHz: **{G_aut:.2f} dBi**")
-        else:
-            st.error("Erro ao interpolar os parâmetros.")
+        # Calcula o ganho ponto a ponto (para gráfico)
+        min_len = min(len(df_ref), len(df_aut))
+        freq_common = df_ref["Freq"].iloc[:min_len]
+        G_aut_curve = G_ref + (df_aut["S21_mag"].iloc[:min_len] - df_ref["S21_mag"].iloc[:min_len]) + \
+                      10*np.log10((1 - 10**(df_ref["S11_mag"].iloc[:min_len]/10))/(1 - 10**(df_aut["S11_mag"].iloc[:min_len]/10)))
+
+        # === Resultado na frequência de interesse ===
+        G_aut_freq = calc_gain(G_ref, s21_aut, s21_ref, s11_aut, s11_ref)
+
+        st.subheader("📈 Gráfico do ganho da antena sob teste (AUT)")
+        fig, ax = plt.subplots()
+        ax.plot(freq_common/1e6, G_aut_curve, label="Ganho AUT (calculado)", linewidth=2)
+        ax.axvline(freq_input, color='r', linestyle='--', label=f'{freq_input:.2f} MHz')
+        ax.set_xlabel("Frequência (MHz)")
+        ax.set_ylabel("Ganho (dBi)")
+        ax.grid(True)
+        ax.legend()
+        st.pyplot(fig)
+
+        # === Exibe resultados numéricos ===
+        st.subheader("📊 Dados usados no cálculo")
+        st.write(f"**Frequência de interesse:** {freq_input:.2f} MHz")
+        st.write(f"**S21 (Tx → Ref):** {s21_ref:.2f} dB")
+        st.write(f"**S21 (Tx → AUT):** {s21_aut:.2f} dB")
+        st.write(f"**S11 (Ref):** {s11_ref:.2f} dB → |Γ_ref| = {10**(s11_ref/20):.4f}")
+        st.write(f"**S11 (AUT):** {s11_aut:.2f} dB → |Γ_aut| = {10**(s11_aut/20):.4f}")
+        st.write(f"**Ganho conhecido da antena padrão:** {G_ref:.2f} dBi")
+
+        st.subheader("🧮 Cálculo do ganho da AUT")
+        st.latex(r"""
+        G_{AUT} = G_{ref} + (S_{21,AUT} - S_{21,ref}) + 10 \log_{10}\left(\frac{1 - |\Gamma_{ref}|^2}{1 - |\Gamma_{AUT}|^2}\right)
+        """)
+        st.write(f"**Resultado:** {G_aut_freq:.2f} dBi")
+
+        st
