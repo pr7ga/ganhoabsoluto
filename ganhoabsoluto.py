@@ -1,209 +1,81 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import io
-import re
 
-st.set_page_config(layout="wide")
-st.title("Ganho da Antena AUT — Método das Três Antenas")
-st.markdown("Faça upload dos três arquivos S21 (duas a duas) e informe a frequência (MHz) para calcular o ganho da AUT.")
+st.title("Cálculo de Ganho da Antena Sob Teste (AUT) a partir de arquivos S2P")
 
-def read_s21_file(uploaded_file):
-    """
-    Lê arquivos como os que você enviou:
-    - pula cabeçalhos estranhos até encontrar a linha 'Frequency' ou a primeira linha de dados,
-    - lê CSV com vírgula,
-    - seleciona as duas primeiras colunas (freq + amplitude),
-    - converte de Hz->MHz se necessário e retorna DataFrame com colunas:
-      'Frequência (MHz)', 'S21 (dB)'
-    """
-    raw = uploaded_file.getvalue()
-    # tentar decodificações comuns
-    text = None
-    for enc in ("utf-8", "latin1", "cp1252"):
-        try:
-            text = raw.decode(enc)
-            break
-        except Exception:
-            continue
-    if text is None:
-        text = raw.decode("utf-8", errors="ignore")
+st.markdown("""
+Este aplicativo calcula o ganho de uma antena sob teste (AUT) com base em medições S2P.
+Você deve carregar:
+- Um arquivo S2P referente à medição entre a antena transmissora e a **antena padrão** (com ganho conhecido);
+- Um arquivo S2P referente à medição entre a antena transmissora e a **antena sob teste (AUT)**.
+""")
 
-    lines = text.splitlines()
+# === Upload dos arquivos ===
+file_ref = st.file_uploader("Carregue o arquivo S2P da antena padrão", type=["s2p"])
+file_aut = st.file_uploader("Carregue o arquivo S2P da antena sob teste (AUT)", type=["s2p"])
 
-    # 1) procura linha que contém 'frequency' (cabeçalho)
-    idx = next((i for i, L in enumerate(lines) if "frequency" in L.lower()), None)
+# === Entradas adicionais ===
+freq_input = st.number_input("Frequência de interesse (MHz):", min_value=0.0, step=0.1)
+G_ref = st.number_input("Ganho conhecido da antena padrão (dBi):", step=0.1)
 
-    # 2) se não encontrar cabeçalho, procura a primeira linha que contenha notação científica (dados)
-    if idx is None:
-        pattern = re.compile(r"^[\s\"']*[+\-]?\d+(\.\d+)?[eE][+\-]?\d+")
-        idx = next((i for i, L in enumerate(lines) if pattern.search(L)), 0)
+# === Função para ler arquivo S2P ===
+def read_s2p(file):
+    if file is None:
+        return None
 
-    sub = "\n".join(lines[idx:])
-
-    # tenta ler com vírgula (formato dos seus arquivos). se falhar, tenta whitespace
-    try:
-        df = pd.read_csv(io.StringIO(sub), sep=",", engine="python")
-    except Exception:
-        df = pd.read_csv(io.StringIO(sub), sep=r"\s+", engine="python", header=None)
-
-    if df.shape[1] < 2:
-        raise ValueError("Não foi possível extrair pelo menos duas colunas (freq + amplitude). Verifique o arquivo.")
-
-    # usa apenas as duas primeiras colunas
-    df = df.iloc[:, :2].copy()
-    # normaliza nomes e remove espaços/aspas
-    df.columns = [str(c).strip() for c in df.columns]
-    df.columns = ["Frequency_raw", "S21_raw"]
-
-    # remove '+' e aspas em strings e converte para numérico
-    df["Frequency_raw"] = df["Frequency_raw"].astype(str).str.replace(r"[+\"']", "", regex=True)
-    df["S21_raw"] = df["S21_raw"].astype(str).str.replace(r"[+\"']", "", regex=True)
-
-    df["Frequency_raw"] = pd.to_numeric(df["Frequency_raw"], errors="coerce")
-    df["S21_raw"] = pd.to_numeric(df["S21_raw"], errors="coerce")
-    df = df.dropna().reset_index(drop=True)
-
-    if df.empty:
-        raise ValueError("Após limpeza não restaram dados válidos.")
-
-    # se frequência estiver em Hz (ex.: 1e8...), converte para MHz
-    if df["Frequency_raw"].max() > 1e6:
-        df["Frequency_MHz"] = df["Frequency_raw"] / 1e6
-    else:
-        df["Frequency_MHz"] = df["Frequency_raw"]
-
-    df = df[["Frequency_MHz", "S21_raw"]].rename(columns={"Frequency_MHz": "Frequência (MHz)", "S21_raw": "S21 (dB)"})
-    df = df.sort_values("Frequência (MHz)").drop_duplicates(subset="Frequência (MHz)", keep="first").reset_index(drop=True)
+    # Lê o conteúdo e ignora o cabeçalho (linhas começando com '!' ou '#')
+    content = file.getvalue().decode(errors='ignore').splitlines()
+    data_lines = [line for line in content if not line.startswith('!') and not line.startswith('#') and line.strip() != '']
+    df = pd.read_csv(io.StringIO("\n".join(data_lines)), 
+                     delim_whitespace=True, 
+                     header=None,
+                     names=["Freq", "S11_mag", "S11_phase", "S21_mag", "S21_phase", 
+                            "S12_mag", "S12_phase", "S22_mag", "S22_phase"])
     return df
 
-# upload (nomes atualizados: HORN -> ANT1, LOGPED -> ANT2)
-f_aut_logped = st.file_uploader("S21 AUT + ANT2", type=["csv"])
-f_horn_logped = st.file_uploader("S21 ANT1 + ANT2", type=["csv"])
-f_aut_horn = st.file_uploader("S21 AUT + ANT1", type=["csv"])
+# === Interpolação ===
+def interpolate_param(df, freq_target):
+    # Verifica se freq_target está dentro do intervalo
+    if freq_target < df["Freq"].min() or freq_target > df["Freq"].max():
+        st.warning("Frequência fora do intervalo de dados!")
+        return None
+    
+    # Interpola magnitude e fase
+    s11_mag = np.interp(freq_target, df["Freq"], df["S11_mag"])
+    s21_mag = np.interp(freq_target, df["Freq"], df["S21_mag"])
+    s22_mag = np.interp(freq_target, df["Freq"], df["S22_mag"])
+    return s11_mag, s21_mag, s22_mag
 
-freq_input = st.number_input("Frequência (MHz) para cálculo do ganho", min_value=0.0, step=0.01, format="%.4f")
+# === Cálculo do ganho ===
+def calc_gain(G_ref, S21_aut_dB, S21_ref_dB, S11_aut_dB, S11_ref_dB):
+    # Converte S11 de dB para |Γ|
+    gamma_aut = 10**(S11_aut_dB/20)
+    gamma_ref = 10**(S11_ref_dB/20)
 
-if f_aut_logped and f_horn_logped and f_aut_horn and freq_input > 0:
-    try:
-        df_aut_logped = read_s21_file(f_aut_logped)
-        df_horn_logped = read_s21_file(f_horn_logped)
-        df_aut_horn = read_s21_file(f_aut_horn)
-    except Exception as e:
-        st.error(f"Erro ao ler os arquivos: {e}")
-        st.stop()
+    # Fórmula: G_AUT = G_ref + (S21_aut - S21_ref) + 10*log10((1 - |Γ_ref|²)/(1 - |Γ_aut|²))
+    gain_aut = G_ref + (S21_aut_dB - S21_ref_dB) + 10*np.log10((1 - gamma_ref**2)/(1 - gamma_aut**2))
+    return gain_aut
 
-    # mostra prévias para conferência (nomes atualizados)
-    # st.write("Prévia (AUT + ANT2):")
-    # st.dataframe(df_aut_logped.head())
-    # st.write("Prévia (ANT1 + ANT2):")
-    # st.dataframe(df_horn_logped.head())
-    # st.write("Prévia (AUT + ANT1):")
-    # st.dataframe(df_aut_horn.head())
+# === Quando ambos arquivos são carregados ===
+if file_ref and file_aut and freq_input > 0:
+    df_ref = read_s2p(file_ref)
+    df_aut = read_s2p(file_aut)
 
-    # função de interpolaçao (garante ordenação)
-    def interp(df, fMHz):
-        xs = df["Frequência (MHz)"].values
-        ys = df["S21 (dB)"].values
-        # se fMHz fora do range, interp irá extrapolar — avisamos
-        if fMHz < xs.min() or fMHz > xs.max():
-            st.warning(f"Frequência {fMHz} MHz está fora do intervalo de dados ({xs.min():.3f} — {xs.max():.3f} MHz). O valor será extrapolado.")
-        return float(np.interp(fMHz, xs, ys))
+    if df_ref is not None and df_aut is not None:
+        # Converte MHz para mesma unidade dos arquivos (verifica automaticamente)
+        freq_target = freq_input
+        # Detecta unidade (se valores ~10^6, então Hz)
+        if df_ref["Freq"].mean() > 1e6:
+            freq_target *= 1e6
 
-    M_aut_logped = interp(df_aut_logped, freq_input)
-    M_horn_logped = interp(df_horn_logped, freq_input)
-    M_aut_horn = interp(df_aut_horn, freq_input)
+        s11_ref, s21_ref, s22_ref = interpolate_param(df_ref, freq_target)
+        s11_aut, s21_aut, s22_aut = interpolate_param(df_aut, freq_target)
 
-    G_aut = (M_aut_horn + M_aut_logped - M_horn_logped) / 2.0
-
-    st.subheader("Resultado")
-    st.write(f"Frequência: **{freq_input:.4f} MHz**")
-    st.write(f"M(AUT,ANT2) = {M_aut_logped:.6f} dB")
-    st.write(f"M(ANT1,ANT2) = {M_horn_logped:.6f} dB")
-    st.write(f"M(AUT,ANT1) = {M_aut_horn:.6f} dB")
-    st.success(f"Ganho da AUT = **{G_aut:.6f} dB**")
-
-    # plot das três curvas e linha vertical na frequência selecionada (labels atualizados)
-    fig, ax = plt.subplots(figsize=(9,4))
-    ax.plot(df_aut_logped["Frequência (MHz)"], df_aut_logped["S21 (dB)"], label="AUT + ANT2")
-    ax.plot(df_horn_logped["Frequência (MHz)"], df_horn_logped["S21 (dB)"], label="ANT1 + ANT2")
-    ax.plot(df_aut_horn["Frequência (MHz)"], df_aut_horn["S21 (dB)"], label="AUT + ANT1")
-    ax.axvline(freq_input, color="red", linestyle="--", label=f"{freq_input} MHz")
-    ax.set_xlabel("Frequência (MHz)")
-    ax.set_ylabel("S21 (dB)")
-    ax.legend()
-    st.pyplot(fig)
-
-    # --- Adicionado: botões para baixar o gráfico S21 e os dados do ganho (CSV) ---
-    # PNG do gráfico S21
-    buf_png = io.BytesIO()
-    fig.savefig(buf_png, format="png", bbox_inches='tight')
-    buf_png.seek(0)
-    st.download_button(
-        label="📈 Baixar gráfico S21 (PNG)",
-        data=buf_png.getvalue(),
-        file_name=f"grafico_s21_{freq_input:.4f}MHz.png",
-        mime="image/png"
-    )
-
-    # CSV com os dados do ganho no ponto solicitado
-    df_point = pd.DataFrame({
-        "Frequência (MHz)": [freq_input],
-        "M(AUT,ANT2)_dB": [M_aut_logped],
-        "M(ANT1,ANT2)_dB": [M_horn_logped],
-        "M(AUT,ANT1)_dB": [M_aut_horn],
-        "G_AUT_dB": [G_aut]
-    })
-    csv_buf = io.StringIO()
-    df_point.to_csv(csv_buf, index=False)
-    st.download_button(
-        label="📊 Baixar dados do ganho (CSV)",
-        data=csv_buf.getvalue(),
-        file_name=f"ganho_aut_{freq_input:.4f}MHz.csv",
-        mime="text/csv"
-    )
-    # --- fim das adições ---
-
-    # opcional: calcular e mostrar curva de ganho na faixa comum
-    if st.checkbox("Gerar curva de ganho AUT na faixa comum"):
-        f_min = max(df_aut_logped["Frequência (MHz)"].min(), df_horn_logped["Frequência (MHz)"].min(), df_aut_horn["Frequência (MHz)"].min())
-        f_max = min(df_aut_logped["Frequência (MHz)"].max(), df_horn_logped["Frequência (MHz)"].max(), df_aut_horn["Frequência (MHz)"].max())
-        if f_min >= f_max:
-            st.error("Não existe faixa comum entre as três medições para gerar a curva de ganho.")
+        if None not in [s11_ref, s21_ref, s11_aut, s21_aut]:
+            # Cálculo do ganho
+            G_aut = calc_gain(G_ref, s21_aut, s21_ref, s11_aut, s11_ref)
+            st.success(f"Ganho da antena sob teste (AUT) na frequência {freq_input:.2f} MHz: **{G_aut:.2f} dBi**")
         else:
-            grid = np.linspace(f_min, f_max, 600)
-            M1 = np.interp(grid, df_aut_horn["Frequência (MHz)"].values, df_aut_horn["S21 (dB)"].values)
-            M2 = np.interp(grid, df_aut_logped["Frequência (MHz)"].values, df_aut_logped["S21 (dB)"].values)
-            M3 = np.interp(grid, df_horn_logped["Frequência (MHz)"].values, df_horn_logped["S21 (dB)"].values)
-            Ggrid = (M1 + M2 - M3) / 2.0
-            fig2, ax2 = plt.subplots(figsize=(9,4))
-            ax2.plot(grid, Ggrid, label="Ganho AUT (3-antenas)")
-            ax2.set_xlabel("Frequência (MHz)")
-            ax2.set_ylabel("Ganho (dB)")
-            ax2.legend()
-            st.pyplot(fig2)
-
-            # --- Adicionado: botões para baixar gráfico de ganho e CSV da curva ---
-            buf_png2 = io.BytesIO()
-            fig2.savefig(buf_png2, format="png", bbox_inches='tight')
-            buf_png2.seek(0)
-            st.download_button(
-                label="📈 Baixar gráfico de ganho AUT (PNG)",
-                data=buf_png2.getvalue(),
-                file_name="grafico_ganho_aut.png",
-                mime="image/png"
-            )
-
-            df_grid = pd.DataFrame({"Frequência (MHz)": grid, "G_AUT_dB": Ggrid})
-            csv_buf2 = io.StringIO()
-            df_grid.to_csv(csv_buf2, index=False)
-            st.download_button(
-                label="📊 Baixar curva de ganho (CSV)",
-                data=csv_buf2.getvalue(),
-                file_name="curva_ganho_aut.csv",
-                mime="text/csv"
-            )
-            # --- fim das adições ---
-else:
-    st.info("Carregue os três arquivos e coloque uma frequência (MHz) para calcular o ganho.")
+            st.error("Erro ao interpolar os parâmetros.")
